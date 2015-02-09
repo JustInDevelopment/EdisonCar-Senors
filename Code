@@ -1,0 +1,271 @@
+#include <jsonlite.h>
+#include <SPI.h>
+#include <WiFi.h>
+#include "M2XStreamClient.h"
+#include <Servo.h>
+
+#define ALCOHOL_DAT A0
+#define COLLISION_SENSOR 2
+#define WATER_SENSOR 3
+#define HEATER_SEL A3
+#define pinTemp A1
+#define FLAME_SENSOR 5 
+#define outPin 7
+#define inPin 8
+
+float temperature;
+int B = 3975; // B value of the thermistor
+float resistance;
+char ssid[] = "**********"; // your network SSID (name)
+char pass[] = "**********"; // your network password (use for WPA, or use as key for WEP)
+int status = WL_IDLE_STATUS;
+char feedId[] = "*****************";
+char deviceId[] = "*****************"; // Device you want to push to
+char streamName[] = "DistanceInches"; // Stream you want to push to
+char streamName2[] = "WaterSensor";
+char streamName3[] = "Alcohol";
+char streamName4[] = "Temperature";
+char streamName5[] = "TemperatureF";
+char streamName6[] = "Flame";
+char streamName7[] = "Collision";
+char m2xKey[] = "**********************"; // Your M2X access key
+const int temperaturePin = 0;
+
+WiFiClient client;
+M2XStreamClient m2xClient(&client, m2xKey);
+Servo myServo;
+
+void setup() {
+
+	pinMode(13, HIGH);
+	pinMode(outPin, OUTPUT_FAST);
+	pinMode(inPin, INPUT_FAST);
+	pinsInit();
+	switchOnHeater();
+	Serial.begin(115200);
+
+	if (WiFi.status() == WL_NO_SHIELD)
+	{
+		Serial.println("WiFi shield not present");
+		while (true);
+	}
+	while (status != WL_CONNECTED)
+	{
+		Serial.print("Attempting to connect to SSID: ");
+		Serial.println(ssid);
+		status = WiFi.begin(ssid, pass);
+		delay(10000);
+	}
+	Serial.println("Connected to wifi");
+	printWifiStatus();
+	myServo.attach(6);
+}
+
+
+void loop()
+{
+	int val = analogRead(pinTemp); 
+	resistance = (float)(1023 - val) * 10000 / val; 
+	temperature = 1 / (log(resistance / 10000) / B + 1 / 298.15) - 273.15; 
+	Serial.println(temperature);
+	delay(300); 
+	int responseTemp = m2xClient.updateStreamValue(deviceId, streamName4, temperature);
+	Serial.print("M2x client response code: ");
+	Serial.println(responseTemp);
+	float far = temperature*1.8 + 32;
+	int responseTempF = m2xClient.updateStreamValue(deviceId, streamName5, far);
+	Serial.print("M2x client response code: ");
+	Serial.println(responseTempF);
+
+	if (isTriggered())
+	{
+		Serial.println("Collision has been detected!");
+	}
+	myServo.write(45);
+
+	long duration, inches, cm, distance;
+	distance = inches / 12;
+	fastDigitalWrite(outPin, LOW);
+	waitMicros(2);
+	fastDigitalWrite(outPin, HIGH);
+	waitMicros(10);
+	fastDigitalWrite(outPin, LOW);
+	duration = pulseIn(inPin, HIGH); 
+	inches = microsecondsToInches(duration);
+	cm = microsecondsToCentimeters(duration);
+	Serial.print(inches);
+	Serial.print("in, ");
+	Serial.print(cm);
+	Serial.print("cm");
+	Serial.println();
+	int response = m2xClient.updateStreamValue(deviceId, streamName, inches);
+	Serial.print("M2x client response code: ");
+	Serial.println(response);
+	if (inches <= 12)
+	{
+		myServo.write(117);
+		delay(300);
+		myServo.write(45);
+		delay(9000);
+		myServo.write(117);
+		delay(300);
+		myServo.write(45);
+		delay(100);
+	}
+	if (isExposedToWater())
+	{
+		soundAlarm();
+		int response = m2xClient.updateStreamValue(deviceId, streamName2, "1");
+		Serial.print("M2x client response code: ");
+		Serial.println(response);
+	}
+	else
+	{
+		int response = m2xClient.updateStreamValue(deviceId, streamName2, "0");
+		Serial.print("M2x client response code: ");
+		Serial.println(response);
+	}
+
+	aclValue();
+	isFlameDetected();
+	isTriggered();
+}
+
+void printWifiStatus()
+{
+	Serial.print("SSID: ");
+	Serial.println(WiFi.SSID());
+	IPAddress ip = WiFi.localIP();
+	Serial.print("IP Address: ");
+	Serial.println(ip);
+	long rssi = WiFi.RSSI();
+	Serial.print("signal strength (RSSI):");
+	Serial.print(rssi);
+	Serial.println(" dBm");
+}
+
+void waitMicros(int val)
+{
+	unsigned long a = micros();
+	unsigned long b = micros();
+	while ((b - a) < val)
+	{
+		b = micros();
+		if (a>b)
+		{
+			break;
+		}
+	}
+}
+
+long microsecondsToInches(long microseconds)
+{
+	return microseconds / 74 / 2;
+}
+long microsecondsToCentimeters(long microseconds)
+{
+	return microseconds / 29 / 2;
+}
+void switchOnHeater()
+{
+	digitalWrite(HEATER_SEL, HIGH);
+}
+
+void switchOffHeater()
+{
+	digitalWrite(HEATER_SEL, LOW);
+}
+
+void aclValue()
+{
+	long sensorValue;
+	sensorValue = analogRead(ALCOHOL_DAT); 
+	long value = 1023 - sensorValue;
+	Serial.print("sensor test value = " + sensorValue);
+	Serial.println(value);
+
+	if (value < 200)
+	{
+		Serial.println("No alcohol vapor detected");
+		int response = m2xClient.updateStreamValue(deviceId, streamName3, "0");
+		Serial.print("M2x client response code: ");
+		Serial.println(response);
+	}
+	else if ((value > 600) && (value < 750))
+	{
+		Serial.println("High Concentration of Alcohol detected");
+		int response = m2xClient.updateStreamValue(deviceId, streamName3, "1");
+		Serial.print("M2x client response code: ");
+		Serial.println(response);
+	}
+	else
+	{
+		Serial.println("Very high Concentration of Alcohol detected");
+		delay(100);
+		int response = m2xClient.updateStreamValue(deviceId, streamName3, "2");
+		Serial.print("M2x client response code: ");
+		Serial.println(response);
+	}
+}
+void pinsInit()
+{
+	pinMode(COLLISION_SENSOR, INPUT);
+	pinMode(WATER_SENSOR, INPUT);
+	pinMode(HEATER_SEL, OUTPUT);
+	switchOffHeater(); 
+	pinMode(ALCOHOL_DAT, INPUT);
+	pinMode(FLAME_SENSOR, INPUT);
+}
+boolean isTriggered()
+{
+	if (!digitalRead(COLLISION_SENSOR))
+	{
+		delay(50);
+		if (!digitalRead(COLLISION_SENSOR))
+		{
+			int responseCollision = m2xClient.updateStreamValue(deviceId, streamName7, "1");
+			Serial.print("M2x client response code: ");
+			Serial.println(responseCollision);
+			Serial.println("Collision has been detected!");
+			return true;
+		}
+	}
+	int responseCollision = m2xClient.updateStreamValue(deviceId, streamName7, "0");
+	Serial.print("M2x client response code: ");
+	Serial.println(responseCollision);
+	Serial.println("No collision detected.");
+	return false;
+}
+boolean isExposedToWater()
+{
+	if (digitalRead(WATER_SENSOR) == LOW)
+	{
+		Serial.println("Water has been detected!");
+		return true;
+	}
+	else return false;
+}
+void soundAlarm()
+{
+	for (uint8_t i = 0; i < 20; i++)
+	{
+	}
+}
+boolean isFlameDetected()
+{
+	if (digitalRead(FLAME_SENSOR))
+	{
+		Serial.print("No Flame detected (:");
+		int response6 = m2xClient.updateStreamValue(deviceId, streamName6, "0");
+		Serial.print("M2x client response code: ");
+		Serial.println(response6);
+		return false;
+	}
+	else
+	{
+		Serial.print("Flame has been detected!!!");
+		int response6 = m2xClient.updateStreamValue(deviceId, streamName6, "1");
+		Serial.print("M2x client response code: ");
+		Serial.println(response6);
+	}
+}
